@@ -1,5 +1,5 @@
 #include "tasksys.h"
-
+#include <thread>
 
 IRunnable::~IRunnable() {}
 
@@ -48,13 +48,9 @@ const char* TaskSystemParallelSpawn::name() {
     return "Parallel + Always Spawn";
 }
 
-TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads): ITaskSystem(num_threads) {
-    //
-    // TODO: CS149 student implementations may decide to perform setup
-    // operations (such as thread pool construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
+TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads): ITaskSystem(num_threads), 
+num_threads_(num_threads) 
+{
 }
 
 TaskSystemParallelSpawn::~TaskSystemParallelSpawn() {}
@@ -68,8 +64,37 @@ void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
     // tasks sequentially on the calling thread.
     //
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    // Step0: decide dynamic or static assignment of tasks to threads
+    // Step0.0: use a static methods, each thread handles num_total_tasks / num_threads task
+    size_t tasks_per_thread = num_total_tasks / num_threads_;
+    size_t remaining_tasks = num_total_tasks % num_threads_;
+    size_t current_task_id = 0;
+
+    // Step0.1: prepare queue of workers
+    std::vector<std::thread> workers;
+
+    // Step1: spawn threads 
+    for (size_t i = 0; i < num_threads_; ++i) {
+        size_t num_task_for_this_thread = tasks_per_thread;
+        // evenly distrubute the remaining tasks to the first several threads
+        if (i < remaining_tasks) {
+            num_task_for_this_thread++;
+        }
+
+        // Spawn a thread and push it into the vector
+        workers.emplace_back([=] {
+            for (size_t task_id = current_task_id; task_id < current_task_id + num_task_for_this_thread; task_id += 1) {
+                runnable->runTask(task_id, num_total_tasks);
+            }
+        });
+
+        // Update the current task id
+        current_task_id += num_task_for_this_thread;
+    }
+
+    // Step2: join all threads
+    for (auto& t : workers) {
+        t.join();
     }
 }
 
