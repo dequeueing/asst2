@@ -1,6 +1,8 @@
 #include "tasksys.h"
 #include <thread>
 #include <atomic>
+#include <queue>
+#include <mutex>
 
 IRunnable::~IRunnable() {}
 
@@ -129,7 +131,6 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     //
     num_threads_ = num_threads;
     should_exit_ = false;
-    has_work_ = false;
     
     // Create worker threads
     for (int i = 0; i < num_threads_; i++) {
@@ -156,21 +157,25 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // tasks sequentially on the calling thread.
     //
 
-    // Set up the work for worker threads
-    current_runnable_ = runnable;
-    total_tasks_ = num_total_tasks;
-    next_task_id_ = 0;
+    // Reset completion counter
     completed_tasks_ = 0;
     
-    // Signal that work is available
-    has_work_ = true;
-    
-    // Wait for all tasks to complete (spinning)
-    while (completed_tasks_.load() < num_total_tasks) {
+    // Add all tasks to the queue
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        for (int i = 0; i < num_total_tasks; i++) {
+            Task task;
+            task.task_id = i;
+            task.total_tasks = num_total_tasks;
+            task.runnable = runnable;
+            task_queue_.push(task);
+        }
     }
     
-    // Clear work flag
-    has_work_ = false;
+    // Wait for all tasks to actually complete execution
+    while (completed_tasks_.load() < num_total_tasks) {
+        std::this_thread::yield();
+    }
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
@@ -191,21 +196,29 @@ void TaskSystemParallelThreadPoolSpinning::worker_thread_function() {
             break;
         }
         
-        // Check if there's work to do
-        if (has_work_) {
-            // Try to get a task
-            int task_id = next_task_id_.fetch_add(1);
-            
-            // Check if we got a valid task
-            if (task_id < total_tasks_) {
-                // Execute the task
-                current_runnable_->runTask(task_id, total_tasks_);
-                
-                // Mark this task as completed
-                completed_tasks_.fetch_add(1);
+        Task task;
+        bool has_task = false;
+        
+        // Try to get a task from the queue
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (!task_queue_.empty()) {
+                task = task_queue_.front();
+                task_queue_.pop();
+                has_task = true;
             }
         }
-        // Continue spinning (checking for work)
+        
+        if (has_task) {
+            // Execute the task
+            task.runnable->runTask(task.task_id, task.total_tasks);
+            
+            // Mark task as completed AFTER execution
+            completed_tasks_.fetch_add(1);
+        } else {
+            // No work available, yield to other threads
+            std::this_thread::yield();
+        }
     }
 }
 

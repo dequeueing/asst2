@@ -5,6 +5,8 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <queue>
+#include <mutex>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -60,15 +62,20 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         int num_threads_;
         std::vector<std::thread> worker_threads_;
         
-        // Shared state for task distribution
-        std::atomic<int> next_task_id_;
-        std::atomic<int> completed_tasks_;
-        int total_tasks_;
-        IRunnable* current_runnable_;
+        // Task structure to hold work items
+        struct Task {
+            int task_id;
+            int total_tasks;
+            IRunnable* runnable;
+        };
+        
+        // Shared state for task distribution using queue and mutex
+        std::queue<Task> task_queue_;
+        std::mutex queue_mutex_;
+        std::atomic<int> completed_tasks_;  // Still need this for synchronous behavior
         
         // Thread control
         std::atomic<bool> should_exit_;
-        std::atomic<bool> has_work_;
         
         // Worker thread function
         void worker_thread_function();
