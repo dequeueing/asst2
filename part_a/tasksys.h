@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <atomic>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -72,11 +73,13 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
                                 const std::vector<TaskID>& deps);
         void sync();
     private:
-        int num_threads_;
-        bool all_tasks_enqueued_; 
-        std::mutex lock_;
-        std::vector<std::thread> thread_pool_;
-        std::queue<IRunnableWrapper> tasks_;
+        int num_threads_;                         // static, read-only across threads
+        std::atomic<bool> threads_should_quit_;   // indicate the system deallocated
+        std::atomic<int> tasks_completed_;        // for the current run(), how many tasks have been completed by workers
+        
+        std::mutex lock_;                       // lock for shared queue 
+        std::queue<IRunnableWrapper> tasks_;    // queue of tasks
+        std::vector<std::thread> thread_pool_;  // thread pool
 };
 
 

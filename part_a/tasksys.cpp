@@ -125,25 +125,24 @@ const char* TaskSystemParallelThreadPoolSpinning::name() {
 TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int num_threads): 
     ITaskSystem(num_threads),
     num_threads_(num_threads),  
-    all_tasks_enqueued_(false) 
+    threads_should_quit_(false) 
 {
     // construct the thread pool
     for (int i = 0; i < num_threads; ++i) {
         thread_pool_.emplace_back([this] {
             // declare a default task
-            IRunnableWrapper task(nullptr, -1, 0);
+            
             while (true) {
+                // Check whether the system is deallocateds
+                if (this->threads_should_quit_) {
+                    return;
+                }
+
+                IRunnableWrapper task(nullptr, -1, 0);
                 {
                     // hold the lock for the shared queue
                     std::lock_guard<std::mutex> lock(this->lock_);
                     
-                    // Check whether all tasks enqueued and finished
-                    if (this->all_tasks_enqueued_ && this->tasks_.empty()) {
-                        return;
-                    }
-                    
-                    // Checkpoint: either queue is not empty or queue is empty but there are more to come
-
                     // Get a task if not empty
                     if (!this->tasks_.empty()) {
                         task = this->tasks_.front();
@@ -153,9 +152,10 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
                 
                 // Check whether a task is retrieved
                 if (task.runnable_ptr) {
-                    // printf("Executing task: %d\n", task.task_id);
-                    task.runnable_ptr->runTask(task.task_id, task.num_total_tasks);
-                    // printf("Task %d finished\n", task.task_id);
+                    task.runnable_ptr->runTask(task.task_id, task.num_total_tasks);                    
+
+                    // Task, finished, increament the counter 
+                    tasks_completed_.fetch_add(1);
                 } 
             }
         });
@@ -164,9 +164,21 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
 }
     
 
-TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {}
+TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
+    // Flag all threads should quit 
+    threads_should_quit_ = true;
+
+
+    // Wait for all threads to join 
+    for (auto& t : thread_pool_) {
+        t.join();
+    }
+}
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
+    // Reset tasks completed for this run
+    tasks_completed_.store(0);
+
     // Main thread executes here
     for (int task_id = 0; task_id < num_total_tasks; task_id+=1) {
         // try acquire the lock
@@ -176,15 +188,16 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
 
             // Push the object into the shared queue
             IRunnableWrapper new_task(runnable, task_id, num_total_tasks);
-            tasks_.emplace(std::move(new_task));
+            tasks_.push(new_task);
         } // Lock is released here!
     }
-    all_tasks_enqueued_ = true;
-
-    // Wait for all threads to join 
-    for (auto& t : thread_pool_) {
-        t.join();
+    
+    // TODO: monitor that all tasks are finished
+    while (tasks_completed_.load() < num_total_tasks) {
+        // spinning to wait
     }
+
+    // Note: should not flag all threads should quit because threads should be reused
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
