@@ -1,5 +1,6 @@
 #include "tasksys.h"
 #include <thread>
+#include <atomic>
 
 IRunnable::~IRunnable() {}
 
@@ -126,9 +127,25 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    num_threads_ = num_threads;
+    should_exit_ = false;
+    has_work_ = false;
+    
+    // Create worker threads
+    for (int i = 0; i < num_threads_; i++) {
+        worker_threads_.emplace_back(&TaskSystemParallelThreadPoolSpinning::worker_thread_function, this);
+    }
 }
 
-TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {}
+TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
+    // Signal threads to exit
+    should_exit_ = true;
+    
+    // Wait for all threads to finish
+    for (auto& thread : worker_threads_) {
+        thread.join();
+    }
+}
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
 
@@ -139,9 +156,21 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // tasks sequentially on the calling thread.
     //
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    // Set up the work for worker threads
+    current_runnable_ = runnable;
+    total_tasks_ = num_total_tasks;
+    next_task_id_ = 0;
+    completed_tasks_ = 0;
+    
+    // Signal that work is available
+    has_work_ = true;
+    
+    // Wait for all tasks to complete (spinning)
+    while (completed_tasks_.load() < num_total_tasks) {
     }
+    
+    // Clear work flag
+    has_work_ = false;
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
@@ -153,6 +182,31 @@ TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnabl
 void TaskSystemParallelThreadPoolSpinning::sync() {
     // You do not need to implement this method.
     return;
+}
+
+void TaskSystemParallelThreadPoolSpinning::worker_thread_function() {
+    while (true) {
+        // Check if we should exit
+        if (should_exit_) {
+            break;
+        }
+        
+        // Check if there's work to do
+        if (has_work_) {
+            // Try to get a task
+            int task_id = next_task_id_.fetch_add(1);
+            
+            // Check if we got a valid task
+            if (task_id < total_tasks_) {
+                // Execute the task
+                current_runnable_->runTask(task_id, total_tasks_);
+                
+                // Mark this task as completed
+                completed_tasks_.fetch_add(1);
+            }
+        }
+        // Continue spinning (checking for work)
+    }
 }
 
 /*
