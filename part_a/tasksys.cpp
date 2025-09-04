@@ -2,6 +2,7 @@
 #include <thread>
 #include <mutex>
 #include <memory>
+#include <condition_variable>
 
 
 IRunnable::~IRunnable() {}
@@ -221,35 +222,93 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
     return "Parallel + Thread Pool + Sleep";
 }
 
-TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): ITaskSystem(num_threads) {
-    //
-    // TODO: CS149 student implementations may decide to perform setup
-    // operations (such as thread pool construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
+TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): 
+    ITaskSystem(num_threads),
+    num_threads_(num_threads),  
+    threads_should_quit_(false) 
+{
+    // construct the thread pool
+    for (int i = 0; i < num_threads; ++i) {
+        thread_pool_.emplace_back([this] {
+            // Worker thread function
+            while (true) {
+                IRunnableWrapper task(nullptr, -1, 0);
+                
+                {
+                    // Wait for work to be available or for shutdown signal
+                    std::unique_lock<std::mutex> lock(this->lock_);
+                    
+                    // Wait until there's work to do or we need to quit
+                    this->work_available_.wait(lock, [this] {
+                        return !this->tasks_.empty() || this->threads_should_quit_;
+                    });
+                    
+                    // Check if we should quit
+                    if (this->threads_should_quit_) {
+                        return;
+                    }
+                    
+                    // Get a task if available
+                    if (!this->tasks_.empty()) {
+                        task = this->tasks_.front();
+                        this->tasks_.pop();
+                    }
+                } // Release the lock
+                
+                // Execute the task if we got one
+                if (task.runnable_ptr) {
+                    task.runnable_ptr->runTask(task.task_id, task.num_total_tasks);
+                    
+                    // Task finished, increment the counter and notify if all tasks are done
+                    {
+                        std::lock_guard<std::mutex> lock(this->lock_);
+                        this->tasks_completed_.fetch_add(1);
+                        this->all_tasks_done_.notify_all();
+                    }
+                }
+            }
+        });
+    }
 }
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
-    //
-    // TODO: CS149 student implementations may decide to perform cleanup
-    // operations (such as thread pool shutdown construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
+    // Signal all threads to quit
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        threads_should_quit_ = true;
+    }
+    
+    // Wake up all worker threads so they can see the quit signal
+    work_available_.notify_all();
+    
+    // Wait for all threads to join
+    for (auto& t : thread_pool_) {
+        t.join();
+    }
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
-
-
-    //
-    // TODO: CS149 students will modify the implementation of this
-    // method in Parts A and B.  The implementation provided below runs all
-    // tasks sequentially on the calling thread.
-    //
-
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    // Reset tasks completed for this run
+    tasks_completed_.store(0);
+    
+    // Add all tasks to the queue
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        for (int task_id = 0; task_id < num_total_tasks; task_id++) {
+            IRunnableWrapper new_task(runnable, task_id, num_total_tasks);
+            tasks_.push(new_task);
+        }
+    }
+    
+    // Notify all worker threads that work is available
+    work_available_.notify_all();
+    
+    // Wait for all tasks to complete
+    {
+        std::unique_lock<std::mutex> lock(lock_);
+        all_tasks_done_.wait(lock, [this, num_total_tasks] {
+            return this->tasks_completed_.load() >= num_total_tasks;
+        });
     }
 }
 
