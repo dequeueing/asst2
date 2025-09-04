@@ -221,13 +221,19 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
     return "Parallel + Thread Pool + Sleep";
 }
 
-TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): ITaskSystem(num_threads) {
-    //
-    // TODO: CS149 student implementations may decide to perform setup
-    // operations (such as thread pool construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
+TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): ITaskSystem(num_threads)
+{
+    // init member variables
+    num_threads_ = num_threads;
+    system_quit_ = false;
+    system_have_tasks_ = false;
+    num_tasks_completed_ = 0;
+    current_task_id_.store(0);
+
+    // create thread pool
+    for(int i = 0; i < num_threads; i++) {
+        thread_pool_.emplace_back(&TaskSystemParallelThreadPoolSleeping::worker_thread_function, this);
+    }
 }
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
@@ -237,7 +243,57 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+
+    // Debug: the deallocated is never called, so the system must hang in run()
+    printf("The thread pool system is deallocated!\n");
+
+    system_quit_.store(true);
+    cv_system_have_tasks_.notify_all();
+
+    // Wait for all threads to join 
+    for (auto& t : thread_pool_) {
+        t.join();
+    }
+
 }
+
+void TaskSystemParallelThreadPoolSleeping::worker_thread_function() {
+    while (true) {
+        // sleep the worker thread if there are no tasks (the system is created but run() is not invoked)
+        std::unique_lock<std::mutex> lock(lock_system_have_tasks_);
+        cv_system_have_tasks_.wait(lock, [this]{return system_have_tasks_ || system_quit_.load();}); // wake up if there are tasks or system quit
+
+        // check whether the system has shut down
+        if (system_quit_.load()) {
+            break;
+        }
+
+        // get the task id
+        int current_task_id = current_task_id_.fetch_add(1);
+
+        // check the scope 
+        if (current_task_id >= num_tasks_) {
+            // set _system_have_tasks_ to false directly to avoid current_task_id_ overflow
+            std::lock_guard<std::mutex> lock(lock_system_have_tasks_);
+            system_have_tasks_ = false;
+        } else {
+
+            // run the task
+            task_runnable_->runTask(current_task_id, num_tasks_);
+
+            // increment number of tasks completed
+            {
+                std::lock_guard<std::mutex> lock(lock_num_tasks_completed_);
+                num_tasks_completed_ += 1; 
+                if (num_tasks_completed_ == num_tasks_) {
+                    cv_num_tasks_completed_.notify_one();
+                }
+            }
+        }
+
+    }
+}
+
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
 
@@ -248,8 +304,26 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     // tasks sequentially on the calling thread.
     //
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    num_tasks_ = num_total_tasks;
+    num_tasks_completed_ = 0;
+    task_runnable_ = runnable;
+    current_task_id_.store(0);
+
+    // wake all the worker threads
+    {
+        std::lock_guard<std::mutex> lock(lock_system_have_tasks_);
+        system_have_tasks_ = true;
+    }
+    cv_system_have_tasks_.notify_all();
+
+    // sleep until all work completd
+    std::unique_lock<std::mutex> lock(lock_num_tasks_completed_);
+    cv_num_tasks_completed_.wait(lock, [this] {return num_tasks_completed_ >= num_tasks_;});
+
+    // set system_have_tasks_ to false
+    {
+        std::lock_guard<std::mutex> lock(lock_system_have_tasks_);
+        system_have_tasks_ = false;
     }
 }
 
