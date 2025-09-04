@@ -244,8 +244,6 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     // (requiring changes to tasksys.h).
     //
 
-    // Debug: the deallocated is never called, so the system must hang in run()
-    printf("The thread pool system is deallocated!\n");
 
     system_quit_.store(true);
     cv_system_have_tasks_.notify_all();
@@ -269,13 +267,11 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread_function() {
         }
 
         // get the task id
-        int current_task_id = current_task_id_.fetch_add(1);
+        long long current_task_id = current_task_id_.fetch_add(1);  // Set to long long to avoid overflow
 
         // check the scope 
         if (current_task_id >= num_tasks_) {
-            // set _system_have_tasks_ to false directly to avoid current_task_id_ overflow
-            std::lock_guard<std::mutex> lock(lock_system_have_tasks_);
-            system_have_tasks_ = false;
+            continue;
         } else {
 
             // run the task
@@ -316,15 +312,19 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     }
     cv_system_have_tasks_.notify_all();
 
+
     // sleep until all work completd
     std::unique_lock<std::mutex> lock(lock_num_tasks_completed_);
     cv_num_tasks_completed_.wait(lock, [this] {return num_tasks_completed_ >= num_tasks_;});
 
+
+    
     // set system_have_tasks_ to false
     {
         std::lock_guard<std::mutex> lock(lock_system_have_tasks_);
         system_have_tasks_ = false;
     }
+
 }
 
 TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
