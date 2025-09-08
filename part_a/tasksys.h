@@ -8,6 +8,9 @@
 #include <thread>
 #include <atomic>
 #include <condition_variable>
+#include <map>
+#include <set>
+
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -102,13 +105,22 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
     private:
         int num_threads_;                         // static, read-only across threads
         std::atomic<bool> threads_should_quit_;   // indicate the system deallocated
-        std::atomic<int> tasks_completed_;        // for the current run(), how many tasks have been completed by workers
+        std::atomic<int> tasks_completed_;        // for the current run(), how many tasks have been completed by workers  
         
         std::mutex lock_;                       // lock for shared queue and condition variables
         std::condition_variable work_available_; // condition variable for worker threads
         std::condition_variable all_tasks_done_; // condition variable for main thread
         std::queue<IRunnableWrapper> tasks_;    // queue of tasks
         std::vector<std::thread> thread_pool_;  // thread pool
+
+        // For async operations 
+        std::vector<TaskID> complted_taskID;         // for runAsync(), record the current task id 
+        std::map<TaskID, std::atomic<int>> taskid_finishedNum;  // for runAsync(), the number of subtasks for task i that has been finished
+        std::map<TaskID, std::set<TaskID>> depending;           // for runAsync(), {1: (2,3,4)} means after 2,3,4 finish, task 1 can run
+        std::map<TaskID, std::set<TaskID>> depended;            // for runAsync(), {2: (1)} means after 2 finsih, task 1 can start
+        
+        // worker thread routine
+        void thread_routine();
 };
 
 #endif

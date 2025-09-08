@@ -61,13 +61,6 @@ TaskSystemParallelSpawn::~TaskSystemParallelSpawn() {}
 
 void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
 
-
-    //
-    // TODO: CS149 students will modify the implementation of this
-    // method in Part A.  The implementation provided below runs all
-    // tasks sequentially on the calling thread.
-    //
-
     // Step0: decide dynamic or static assignment of tasks to threads
     // Step0.0: use a static methods, each thread handles num_total_tasks / num_threads task
     int tasks_per_thread = num_total_tasks / num_threads_;
@@ -193,7 +186,7 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
         } // Lock is released here!
     }
     
-    // TODO: monitor that all tasks are finished
+    // monitor that all tasks are finished
     while (tasks_completed_.load() < num_total_tasks) {
         // spinning to wait
     }
@@ -222,6 +215,47 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
     return "Parallel + Thread Pool + Sleep";
 }
 
+void TaskSystemParallelThreadPoolSleeping::thread_routine() {
+    // Worker thread function
+    while (true) {
+        IRunnableWrapper task(nullptr, -1, 0);
+        
+        {
+            // Wait for work to be available or for shutdown signal
+            std::unique_lock<std::mutex> lock(this->lock_);
+            
+            // Wait until there's work to do or we need to quit
+            this->work_available_.wait(lock, [this] {
+                return !this->tasks_.empty() || this->threads_should_quit_;
+            });
+            
+            // Check if we should quit
+            if (this->threads_should_quit_) {
+                return;
+            }
+            
+            // Get a task if available
+            if (!this->tasks_.empty()) {
+                task = this->tasks_.front();
+                this->tasks_.pop();
+            }
+        } // Release the lock
+        
+        // Execute the task if we got one
+        if (task.runnable_ptr) {
+            task.runnable_ptr->runTask(task.task_id, task.num_total_tasks);
+            
+            // Task finished, increment the counter and notify if all tasks are done
+            {
+                std::lock_guard<std::mutex> lock(this->lock_);
+                this->tasks_completed_.fetch_add(1);
+                this->all_tasks_done_.notify_all();
+            }
+        }
+    }
+}
+
+
 TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): 
     ITaskSystem(num_threads),
     num_threads_(num_threads),  
@@ -230,43 +264,7 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     // construct the thread pool
     for (int i = 0; i < num_threads; ++i) {
         thread_pool_.emplace_back([this] {
-            // Worker thread function
-            while (true) {
-                IRunnableWrapper task(nullptr, -1, 0);
-                
-                {
-                    // Wait for work to be available or for shutdown signal
-                    std::unique_lock<std::mutex> lock(this->lock_);
-                    
-                    // Wait until there's work to do or we need to quit
-                    this->work_available_.wait(lock, [this] {
-                        return !this->tasks_.empty() || this->threads_should_quit_;
-                    });
-                    
-                    // Check if we should quit
-                    if (this->threads_should_quit_) {
-                        return;
-                    }
-                    
-                    // Get a task if available
-                    if (!this->tasks_.empty()) {
-                        task = this->tasks_.front();
-                        this->tasks_.pop();
-                    }
-                } // Release the lock
-                
-                // Execute the task if we got one
-                if (task.runnable_ptr) {
-                    task.runnable_ptr->runTask(task.task_id, task.num_total_tasks);
-                    
-                    // Task finished, increment the counter and notify if all tasks are done
-                    {
-                        std::lock_guard<std::mutex> lock(this->lock_);
-                        this->tasks_completed_.fetch_add(1);
-                        this->all_tasks_done_.notify_all();
-                    }
-                }
-            }
+            this->thread_routine();
         });
     }
 }
@@ -315,19 +313,15 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
 TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                                     const std::vector<TaskID>& deps) {
 
-
-    //
-    // TODO: CS149 students will implement this method in Part B.
-    //
-
     return 0;
 }
 
 void TaskSystemParallelThreadPoolSleeping::sync() {
-
+                                                                                                                                                                                                                                
     //
     // TODO: CS149 students will modify the implementation of this method in Part B.
     //
 
     return;
 }
+                                                                                                                                           
