@@ -60,6 +60,37 @@ struct IRunnableWrapper {
     {}
 };
 
+struct IRunnableWrapperAsync {
+    IRunnable* runnable_ptr;
+    int task_id;
+    int num_total_tasks;
+    TaskID parent_task;
+
+    // Constructor to create a Job
+    IRunnableWrapperAsync(IRunnable* runnable_ptr, int t_id, int total_tasks, TaskID parent_task):
+        runnable_ptr(runnable_ptr), 
+        task_id(t_id),
+        num_total_tasks(total_tasks),
+        parent_task(parent_task)
+    {}
+};
+
+struct TaskMetaData {
+    IRunnable* runnable_ptr;
+    TaskID task_id; 
+    int num_total_tasks;
+
+    // Add default constructor
+    TaskMetaData() : runnable_ptr(nullptr), task_id(0), num_total_tasks(0) {}
+
+    // Constructor to create a TaskMetaData
+    TaskMetaData(IRunnable* runnable_ptr, TaskID task_id, int num_total_tasks):
+        runnable_ptr(runnable_ptr), 
+        task_id(task_id),
+        num_total_tasks(num_total_tasks)
+    {}
+};
+
 
 /*
  * TaskSystemParallelThreadPoolSpinning: This class is the student's
@@ -110,17 +141,25 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         std::mutex lock_;                       // lock for shared queue and condition variables
         std::condition_variable work_available_; // condition variable for worker threads
         std::condition_variable all_tasks_done_; // condition variable for main thread
-        std::queue<IRunnableWrapper> tasks_;    // queue of tasks
         std::vector<std::thread> thread_pool_;  // thread pool
+        std::queue<IRunnableWrapper> tasks_;
 
         // For async operations 
-        std::vector<TaskID> complted_taskID;         // for runAsync(), record the current task id 
-        std::map<TaskID, std::atomic<int>> taskid_finishedNum;  // for runAsync(), the number of subtasks for task i that has been finished
-        std::map<TaskID, std::set<TaskID>> depending;           // for runAsync(), {1: (2,3,4)} means after 2,3,4 finish, task 1 can run
-        std::map<TaskID, std::set<TaskID>> depended;            // for runAsync(), {2: (1)} means after 2 finsih, task 1 can start
+        std::atomic<TaskID> current_TaskID;         // increment task id if new task arrives at the system
+        std::map<TaskID, bool> task_has_finished;   // each task has finished or not? 
+        std::queue<IRunnableWrapperAsync> working_queue; // queue of subtasks that can be executed by worker threads
+        std::queue<TaskID> waiting_queue;
+
+        std::map<TaskID, std::vector<TaskID>> depending; // {1: [2,3]} task 1 depends on 2 and 3 
+        std::map<TaskID, std::vector<TaskID>> depended;  // {2: [1]} only after task 1 finishes can task 2 get started
+
+        std::map<TaskID, std::atomic<int>> task_numFinished; // {1: 5} task 1 has already finished 5 subtasks
+
+        std::map<TaskID, TaskMetaData> task_meta; // {1: meta data object}
         
         // worker thread routine
         void thread_routine();
+        void thread_routine_async();
 };
 
 #endif

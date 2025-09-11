@@ -255,16 +255,99 @@ void TaskSystemParallelThreadPoolSleeping::thread_routine() {
     }
 }
 
+void TaskSystemParallelThreadPoolSleeping::thread_routine_async() {
+    while (true) {
+        IRunnableWrapperAsync subtask(nullptr, -1, 0, -1);
+
+        {
+            // Wait for work to be available or for shutdown signal
+            std::unique_lock<std::mutex> lock(this->lock_);
+
+            // Wait until there's work to do or we need to quit
+            this->work_available_.wait(lock, [this] {
+                return !this->working_queue.empty() || this->threads_should_quit_;
+            });
+
+            // Checkpoint: working queue not empty or system quit
+
+            // check system should quit 
+            if (this->threads_should_quit_) {
+                return;
+            }
+
+            // get task if queue not empty
+            if (!this->working_queue.empty()) {
+                subtask = this->working_queue.front();
+                this->working_queue.pop();
+            }
+        }   // release the lock 
+
+        // execute task if we got one
+        if (subtask.runnable_ptr) { 
+            subtask.runnable_ptr->runTask(subtask.task_id, subtask.num_total_tasks);
+
+            // increment the subtask completed
+            int completed_subtask = task_numFinished[subtask.parent_task].fetch_add(1);
+            
+            // check whether task completed
+            if (completed_subtask == subtask.num_total_tasks - 1) {
+                {
+                    // acquire the lock 
+                    std::lock_guard<std::mutex> lock(lock_);
+
+                    // mark the parent task completed
+                    task_has_finished[subtask.parent_task] = true;
+                    
+                    // notify sync() that a task completed
+                    all_tasks_done_.notify_all();
+
+                    // check dependency 
+                    for (const auto& dep : depended[subtask.parent_task]) {
+                        // dep is a task that is depending on the current one 
+
+                        bool dep_can_start = true;
+                        
+                        // check whether all deps' depending tasks are completed
+                        for (const auto& dep_dependency : depending[dep]) {
+                            if (!task_has_finished[dep_dependency]) {
+                                dep_can_start = false;
+                                break;
+                            }
+                        }
+                        
+                        // start the task if can start
+                        if (dep_can_start) {
+                            // init finished subtask number 
+                            task_numFinished[dep].store(0);
+            
+                            TaskMetaData metadata = task_meta[dep];
+                            
+                            // push subtasks into working queue 
+                            for (int subtask_id = 0; subtask_id < metadata.num_total_tasks; subtask_id++) {
+                                IRunnableWrapperAsync new_task(metadata.runnable_ptr, subtask_id, metadata.num_total_tasks, dep);
+                                working_queue.push(new_task);
+                            }
+
+                            // notify 
+                            work_available_.notify_all();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): 
     ITaskSystem(num_threads),
     num_threads_(num_threads),  
-    threads_should_quit_(false) 
+    threads_should_quit_(false),
+    current_TaskID(0)
 {
     // construct the thread pool
     for (int i = 0; i < num_threads; ++i) {
         thread_pool_.emplace_back([this] {
-            this->thread_routine();
+            this->thread_routine_async();
         });
     }
 }
@@ -286,42 +369,68 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
-    // Reset tasks completed for this run
-    tasks_completed_.store(0);
-    
-    // Add all tasks to the queue
-    {
-        std::lock_guard<std::mutex> lock(lock_);
-        for (int task_id = 0; task_id < num_total_tasks; task_id++) {
-            IRunnableWrapper new_task(runnable, task_id, num_total_tasks);
-            tasks_.push(new_task);
-        }
-    }
-    
-    // Notify all worker threads that work is available
-    work_available_.notify_all();
-    
-    // Wait for all tasks to complete
-    {
-        std::unique_lock<std::mutex> lock(lock_);
-        all_tasks_done_.wait(lock, [this, num_total_tasks] {
-            return this->tasks_completed_.load() >= num_total_tasks;
-        });
-    }
+    // Implement run() using runAsyncWithDeps() and sync()
+    std::vector<TaskID> noDeps;  // empty vector - no dependencies
+    runAsyncWithDeps(runnable, num_total_tasks, noDeps);
+    sync();
 }
 
 TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
-                                                    const std::vector<TaskID>& deps) {
+                                                    const std::vector<TaskID>& deps) 
+{
+    std::lock_guard<std::mutex> lock(lock_);
+    
+    // increment the taskid 
+    TaskID id = current_TaskID.fetch_add(1);
 
-    return 0;
+    // Initialize task state
+    task_has_finished[id] = false;
+    task_numFinished[id].store(0);
+    TaskMetaData metadata(runnable, id, num_total_tasks);
+    task_meta[id] = metadata;
+
+    // Set up dependency relationships
+    depending[id] = deps;
+    for (const auto& dep : deps) {
+        depended[dep].push_back(id);
+    }
+
+    // Check if task can start immediately
+    bool can_start = true;
+    for (const auto& dep : deps) {
+        if (!task_has_finished[dep]) {
+            can_start = false;
+            break;
+        }
+    }
+
+    if (can_start) {
+        // Push subtasks into working queue 
+        for (int subtask_id = 0; subtask_id < num_total_tasks; subtask_id++) {
+            IRunnableWrapperAsync new_task(runnable, subtask_id, num_total_tasks, id);
+            working_queue.push(new_task);
+        }
+        work_available_.notify_all();
+    } else {
+        waiting_queue.push(id);
+    }
+
+    return id;
 }
 
 void TaskSystemParallelThreadPoolSleeping::sync() {
-                                                                                                                                                                                                                                
-    //
-    // TODO: CS149 students will modify the implementation of this method in Part B.
-    //
-
-    return;
+    std::unique_lock<std::mutex> lock(lock_);
+    
+    all_tasks_done_.wait(lock, [this] {
+        // check each task id 
+        TaskID latest_id = current_TaskID.load();
+        
+        for (TaskID id = 0; id < latest_id; id++) {
+            if (!task_has_finished[id]) {
+                return false;
+            }
+        }
+        return true;
+    });
 }
                                                                                                                                            
